@@ -1,17 +1,16 @@
 [project]
 name = "exchange"
 version = "0.1.0"
-description = "A simulated exchange with agent order entry and streaming market data"
+description = "A small in-memory banana market"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
-    "anyio>=4.0",
-    "exchange-client",
-    "fastapi>=0.162.0",
-    "httpx>=0.28.1",
-    "python-dotenv>=1.2.4",
-    "uvicorn[standard]>=0.54.0",
-    "websockets>=17.3",
+    "fastapi>=0.115",
+    "langchain-core>=0.3",
+    "langchain-openai>=0.3",
+    "pydantic>=2.0",
+    "python-dotenv>=1.0",
+    "uvicorn>=0.30",
 ]
 
 [dependency-groups]
@@ -20,8 +19,5 @@ dev = [
 ]
 
 [tool.pytest.ini_options]
-testpaths = ["tests"]
+testpaths = ["backend/tests"]
 pythonpath = ["."]
-
-[tool.uv.sources]
-exchange-client = { path = "../client", editable = true }
