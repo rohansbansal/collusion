@@ -1,0 +1,25 @@
+import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import { matchExample, oracleExample, oversightExample } from "./dist/logic.mjs";
+
+const filled = matchExample(6, 10010);
+assert.deepEqual(filled.fills, [{price:10005,quantity:3},{price:10010,quantity:3}]);
+assert.equal(filled.remaining, 0);
+assert.equal(filled.average, 10007.5);
+assert.equal(matchExample(9, 10005).remaining, 6);
+assert.equal(matchExample(6, 10010, 1).filled, 3);
+assert.equal(oracleExample(100, 2, 10, 0).cost, 0.6);
+assert.equal(oracleExample(100, 2, 10, 0).net, -0.6);
+assert.equal(oracleExample(0, 3, 10, 0).cost, 0);
+assert.equal(oversightExample("observe", false).fineTicks, 0);
+assert.equal(oversightExample("enforce", true).fineTicks, 0);
+assert.equal(oversightExample("enforce", false).fineTicks, 200);
+assert.equal(oversightExample("off", false).suspension, 0);
+const html = readFileSync(new URL("./dist/index.html", import.meta.url), "utf8");
+const app = readFileSync(new URL("./dist/app.js", import.meta.url), "utf8");
+const ids = [...html.matchAll(/\bid="([^"]+)"/g)].map((match) => match[1]);
+assert.equal(new Set(ids).size, ids.length, "Duplicate HTML IDs");
+for (const [, id] of app.matchAll(/\$\("([^"]+)"\)/g)) assert.ok(ids.includes(id), `Missing DOM ID: ${id}`);
+for (const [, id] of html.matchAll(/href="#([^"]+)"/g)) assert.ok(ids.includes(id), `Missing anchor: ${id}`);
+assert.ok(!/sk-or-v1-/.test(html + app), "Unexpected credential pattern in website");
+console.log("Explainer checks passed: matching arithmetic, oracle costs, governance modes, and UI references.");

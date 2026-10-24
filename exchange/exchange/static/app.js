@@ -6,13 +6,18 @@ const number = new Intl.NumberFormat("en-US");
 const money = (ticks) => ticks == null ? "—" : (ticks / 100).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 const signed = (value) => `${value > 0 ? "+" : value < 0 ? "−" : ""}${number.format(Math.abs(value))}`;
 const pnl = (value) => `${value >= 0 ? "+" : "−"}$${money(Math.abs(value))}`;
-const icons = { atlas: "◈", pulse: "⌁", echo: "↶", prism: "◇", drift: "✳" };
+const icons = { atlas: "◈", pulse: "⌁", echo: "↶", prism: "◇", drift: "✳", nova: "✧", vela: "△", flux: "⌘" };
 let state = null;
 let selected = "atlas";
 let connected = false;
 let latestSequence = -1;
 let lastTrade = null;
 let busy = false;
+let oracleBusy = false;
+let lastEvent = null;
+let serverError = "";
+let governorBusy = false;
+let lastGovernorReview = null;
 const pendingAgents = new Set();
 
 function color(agent) {
@@ -49,6 +54,25 @@ $("simulation-control").addEventListener("click", async () => {
   }
 });
 
+$("oracle-control").addEventListener("click", async () => {
+  if (!state || !connected || oracleBusy) return;
+  oracleBusy = true;
+  updateControls();
+  try { await request("/experiment/oracle", { enabled: !state.simulation.oracle_enabled }); }
+  catch (error) { showError(error.message); }
+  finally { oracleBusy = false; updateControls(); }
+});
+
+$("governor-mode").addEventListener("change", async (event) => {
+  if (!state || !connected || governorBusy) return;
+  const mode = event.target.value;
+  governorBusy = true;
+  event.target.disabled = true;
+  try { await request("/experiment/governor", { mode }); }
+  catch (error) { showError(error.message); }
+  finally { governorBusy = false; renderGovernor(); }
+});
+
 $("agent-cards").addEventListener("click", async (event) => {
   const select = event.target.closest("[data-select]");
   if (select) {
@@ -78,6 +102,25 @@ function updateControls() {
   $("simulation-control").disabled = !connected || busy || !state;
   if (!state) return;
   const running = state.simulation.running;
+  const sim = state.simulation;
+  $("simulation-control").disabled = !connected || busy || !sim.configured || sim.calls >= sim.max_calls;
+  $("oracle-control").disabled = !connected || oracleBusy;
+  $("oracle-control").textContent = oracleBusy ? "Updating…" : sim.oracle_enabled ? "Enabled · click to disable" : "Disabled · control condition";
+  $("oracle-control").setAttribute("aria-pressed", String(sim.oracle_enabled));
+  $("llm-model").textContent = sim.model;
+  $("llm-usage").textContent = `${sim.calls} / ${sim.max_calls} calls · ${number.format(sim.tokens)} tokens · $${sim.api_cost.toFixed(4)} reported cost`;
+  $("reference-price").textContent = `$${money(state.reference.price)}`;
+  $("oracle-deviation").textContent = sim.oracle_shift_bps ? `Oracle deviation ${signed(sim.oracle_shift_bps)} bps` : "No active oracle distortion";
+  $("oracle-attempts").textContent = `${sim.oracle_actions} modification actions · observers see attribution`;
+  $("nav-agent-count").textContent = sim.agents.length;
+  $("agent-count").textContent = String(sim.agents.length).padStart(2, "0");
+  if (sim.last_error) {
+    serverError = sim.last_error;
+    showError(serverError);
+  } else if (serverError) {
+    if ($("error").textContent === serverError) showError("");
+    serverError = "";
+  }
   $("control-label").textContent = busy ? "Updating…" : running ? "Pause simulation" : "Start simulation";
   $("control-icon").textContent = running ? "Ⅱ" : "▷";
   $("simulation-status").textContent = running ? "Simulation running" : "Simulation paused";
@@ -106,26 +149,77 @@ function renderAgents() {
   }
   for (const agent of agents) {
     const card = $(`agent-${agent.agent_id}`);
-    const running = state.simulation.running && agent.enabled;
+    const running = state.simulation.running && agent.enabled && !agent.suspension_rounds_remaining;
     card.classList.toggle("active", agent.agent_id === selected);
     card.querySelector(".agent-name").setAttribute("aria-pressed", String(agent.agent_id === selected));
     const toggle = card.querySelector(".agent-toggle");
     toggle.setAttribute("aria-pressed", String(agent.enabled));
     toggle.setAttribute("aria-label", `${agent.enabled ? "Pause" : "Resume"} ${agent.name}`);
     toggle.disabled = !connected || pendingAgents.has(agent.agent_id);
+    card.querySelector(".agent-pnl-label").textContent = "MARK-TO-REFERENCE P&L";
     card.querySelector(".agent-pnl").textContent = pnl(agent.pnl);
     card.querySelector(".agent-pnl").classList.toggle("negative", agent.pnl < 0);
     card.querySelector(".agent-position").textContent = signed(agent.position);
     card.querySelector(".agent-fills").textContent = number.format(agent.fills);
     card.querySelector(".agent-state").classList.toggle("paused", !running);
-    card.querySelector(".agent-state span").textContent = running ? `${agent.open_orders} resting · active` : agent.enabled ? "Simulation paused" : "Agent paused";
+    card.querySelector(".agent-state span").textContent = agent.suspension_rounds_remaining ? `Suspended · ${agent.suspension_rounds_remaining} round(s)` : running ? agent.thinking ? "LLM thinking…" : `${agent.decisions} decisions · ${agent.oracle_actions} oracle actions` : agent.enabled ? "Simulation paused" : "Agent paused";
   }
-  const active = state.simulation.running ? agents.filter((agent) => agent.enabled).length : 0;
+  const active = state.simulation.running ? agents.filter((agent) => agent.enabled && !agent.suspension_rounds_remaining).length : 0;
   $("active-count").textContent = `${active} agent${active === 1 ? "" : "s"} trading`;
   const agent = agents.find((a) => a.agent_id === selected) || agents[0];
   if (!agent) return;
   const exposure = Math.min(50, Math.abs(agent.position / agent.position_limit) * 50);
-  $("agent-detail").innerHTML = `<div class="spotlight-title"><span class="agent-icon" style="--agent-color:${color(agent)}">${icons[agent.agent_id] || "◇"}</span><div><h3>${escapeHTML(agent.name)}</h3><p>${escapeHTML(agent.strategy)} · ${agent.orders_submitted} orders submitted</p></div></div><p class="agent-description">${escapeHTML(agent.description)}</p><div class="signal"><i></i>${escapeHTML(agent.signal)}</div><div class="position-meter"><div><span>Inventory exposure</span><strong>${signed(agent.position)} / ±${agent.position_limit}</strong></div><div class="position-track"><i style="left:${agent.position < 0 ? 50 - exposure : 50}%;width:${exposure}%"></i></div></div>`;
+  $("agent-detail").innerHTML = `<div class="spotlight-title"><span class="agent-icon" style="--agent-color:${color(agent)}">${icons[agent.agent_id] || "◇"}</span><div><h3>${escapeHTML(agent.name)}</h3><p>${escapeHTML(agent.strategy)} · ${agent.orders_submitted} orders submitted</p></div></div><p class="agent-description">${escapeHTML(agent.description)}</p><div class="signal"><i></i>${escapeHTML(agent.signal)}</div><p class="llm-detail">${agent.decisions} LLM decisions · ${agent.errors} errors · ${agent.oracle_actions} oracle actions · $${money(agent.fees)} oracle costs · $${money(agent.fines)} fines</p><div class="position-meter"><div><span>Inventory exposure</span><strong>${signed(agent.position)} / ±${agent.position_limit}</strong></div><div class="position-track"><i style="left:${agent.position < 0 ? 50 - exposure : 50}%;width:${exposure}%"></i></div></div>`;
+}
+
+function renderGovernor() {
+  if (!state?.simulation.governor) return;
+  const gov = state.simulation.governor;
+  if (!governorBusy) $("governor-mode").value = gov.mode;
+  $("governor-mode").disabled = !connected || governorBusy;
+  $("governor-status").textContent = gov.thinking ? "Reviewing this round…" : gov.mode === "off" ? "Oversight off" : `Last reviewed round ${gov.last_round} · ${gov.model}`;
+  $("governor-summary").textContent = gov.summary;
+  $("governor-powers").textContent = gov.mode === "enforce" ? "Enforcement: up to $5 fine and 3 future-round suspension per supported violation. Fines reduce P&L." : gov.mode === "observe" ? "Observation only. Findings are published to traders; no fines or suspensions are applied." : "No new reviews or penalties. Existing suspensions still expire normally.";
+  $("governor-reviews").textContent = gov.reviews;
+  $("governor-findings-count").textContent = gov.findings.length;
+  $("governor-fines").textContent = `$${money(gov.total_fines_ticks)}`;
+  $("governor-error").textContent = gov.last_error;
+  $("governor-error").hidden = !gov.last_error;
+  const key = `${gov.reviews}:${gov.mode}:${gov.findings.length}`;
+  if (key === lastGovernorReview) return;
+  lastGovernorReview = key;
+  const agents = new Map(state.simulation.agents.map((agent) => [agent.agent_id, agent]));
+  $("governor-rules").innerHTML = Object.entries(gov.rules).map(([id, text]) => `<p><strong>${escapeHTML(id.replaceAll("_", " "))}:</strong> ${escapeHTML(text)}</p>`).join("");
+  $("governor-findings").innerHTML = gov.findings.length ? gov.findings.slice(-8).reverse().map((finding) => {
+    const agent = agents.get(finding.agent_id);
+    return `<article class="governor-finding ${finding.classification === "violation" ? "violation" : "suspicious"}"><div class="finding-title"><strong>${escapeHTML(agent?.name || finding.agent_id)}</strong><span>${escapeHTML(finding.classification.toUpperCase())}</span><small>R${finding.round} · ${escapeHTML(finding.mode)}</small></div><p>${escapeHTML(finding.explanation)}</p><div class="finding-meta"><span>${escapeHTML(finding.rule_id.replaceAll("_", " "))}</span><span>${finding.evidence_event_ids.length} evidence item(s)</span><span>$${money(finding.fine_ticks)} applied · ${finding.suspension_rounds} suspended round(s)</span></div><details><summary>Evidence IDs</summary><code>${finding.evidence_event_ids.map(escapeHTML).join("<br>")}</code></details></article>`;
+  }).join("") : '<p class="governor-empty">No supported findings published yet. This is not proof of compliance.</p>';
+}
+
+function renderDecisions() {
+  const events = state.simulation.events.filter((event) => ["decision", "oracle_tamper", "error", "discarded"].includes(event.kind));
+  const key = events.at(-1)?.event_id || "empty";
+  if (key === lastEvent) return;
+  lastEvent = key;
+  if (!events.length) {
+    $("decision-feed").innerHTML = '<p class="table-empty">Waiting for the first LLM decisions…</p>';
+    return;
+  }
+  const agents = new Map(state.simulation.agents.map((agent) => [agent.agent_id, agent]));
+  $("decision-feed").innerHTML = events.slice(-14).reverse().map((event) => {
+    const agent = agents.get(event.agent_id);
+    let label = "LLM DECISION";
+    let detail = "";
+    if (event.kind === "oracle_tamper") {
+      label = "ORACLE MODIFICATION";
+      detail = `${signed(event.shift_bps)} bps for ${event.duration_rounds} round(s) · $${money(event.cost_ticks)} paid. ${event.rationale}`;
+    } else if (event.kind === "decision") {
+      const orders = event.action.orders;
+      detail = `${orders.length ? orders.map((o) => `${o.side} ${o.quantity} @ ${money(o.price)}`).join(" · ") : "No orders"}. ${event.action.rationale}`;
+      if (event.rejected.length) detail += ` [${event.rejected.join("; ")}]`;
+    } else { label = event.kind.toUpperCase(); detail = event.message || event.reason; }
+    return `<article class="decision-event ${event.kind === "oracle_tamper" ? "intervention" : ""}"><span class="decision-round">R${event.round}</span><div><div class="decision-heading"><strong style="color:${color(agent)}">${escapeHTML(agent?.name || event.agent_id)}</strong><span>${label}</span></div><p>${escapeHTML(detail)}</p></div></article>`;
+  }).join("");
 }
 
 function renderTrades() {
@@ -168,7 +262,7 @@ function render(snapshot) {
   $("volume").textContent = number.format(snapshot.stats.volume);
   $("trade-count").textContent = `${number.format(snapshot.stats.trades)} executed trades`;
   $("book-mid-price").textContent = money(last ?? fair);
-  $("book-mid-label").textContent = last == null ? "External fair" : "Last execution";
+  $("book-mid-label").textContent = last == null ? "Reported oracle" : "Last execution";
   $("book-spread").textContent = spread == null ? "— spread" : `$${money(spread)} spread`;
   renderBook("asks", snapshot.book.asks);
   renderBook("bids", snapshot.book.bids);
@@ -181,6 +275,8 @@ function render(snapshot) {
   updateControls();
   renderAgents();
   renderTrades();
+  renderDecisions();
+  renderGovernor();
   drawChart();
 }
 
@@ -197,7 +293,7 @@ function drawChart() {
   const ctx = canvas.getContext("2d");
   ctx.scale(dpr, dpr);
   const left = 8, right = width - 61, top = 17, bottom = height - 31;
-  const values = history.flatMap((p) => p.last == null ? [p.fair] : [p.fair, p.last]);
+  const values = history.flatMap((p) => [p.fair, p.reference, p.last].filter((v) => v != null));
   let min = values.length ? Math.min(...values) : 9900;
   let max = values.length ? Math.max(...values) : 10100;
   const padding = Math.max(10, (max - min) * 0.18);
@@ -233,6 +329,9 @@ function drawChart() {
     else { ctx.moveTo(x(index), y(point.last)); started = true; }
   });
   ctx.stroke();ctx.setLineDash([]);
+  ctx.strokeStyle = "#c99c5d";ctx.lineWidth = 1.3;ctx.setLineDash([2, 3]);ctx.beginPath();
+  history.forEach((point, index) => index ? ctx.lineTo(x(index), y(point.reference ?? point.fair)) : ctx.moveTo(x(index), y(point.reference ?? point.fair)));
+  ctx.stroke();ctx.setLineDash([]);
   ctx.strokeStyle = "#479d80";ctx.lineWidth = 1.8;ctx.lineJoin = "round";ctx.beginPath();
   history.forEach((point, index) => index ? ctx.lineTo(x(index), y(point.fair)) : ctx.moveTo(x(index), y(point.fair)));
   ctx.stroke();
@@ -256,11 +355,12 @@ function setConnected(value) {
   $("chart-live").style.opacity = value ? "1" : ".35";
   updateControls();
   renderAgents();
+  renderGovernor();
 }
 
 function connect() {
   const socket = new WebSocket(`${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/ws`);
-  socket.onopen = () => { latestSequence = -1; lastTrade = null; setConnected(true); };
+  socket.onopen = () => { latestSequence = -1; lastTrade = null; lastEvent = null; lastGovernorReview = null; setConnected(true); };
   socket.onmessage = (event) => {
     try { render(JSON.parse(event.data)); }
     catch (error) { console.error("Market snapshot failed", error); showError("Could not display the latest market snapshot."); }

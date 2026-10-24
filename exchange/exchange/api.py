@@ -3,25 +3,33 @@
 import asyncio
 import math
 import random
+import json
 from collections import deque
 from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Literal
 
 import anyio
 from fastapi import FastAPI, HTTPException, Query, WebSocket, WebSocketDisconnect
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, StrictBool
 
 from .engine import MatchingEngine, OrderRequest
 from .simulation import Simulation
+from .llm import LLMConfig
 
 
 class EnabledRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
     enabled: StrictBool
+
+
+class GovernorRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    mode: Literal["off", "observe", "enforce"]
 
 
 def now() -> str:
@@ -45,7 +53,7 @@ class MarketConfig:
 
 
 class Market:
-    def __init__(self, config: MarketConfig):
+    def __init__(self, config: MarketConfig, *, llm_config=None, brain=None, log_path=None):
         self.config = config
         self.engine = MatchingEngine()
         self.lock = asyncio.Lock()
@@ -54,7 +62,7 @@ class Market:
         self.log_fair = math.log(config.initial_fair)
         self.fair_updated_at = now()
         self.sequence = 0
-        self.simulation = Simulation(self, config.seed)
+        self.simulation = Simulation(self, config.seed, config=llm_config, brain=brain, log_path=log_path)
         self.history: deque[dict] = deque(maxlen=240)
         self.sample_history()
 
@@ -63,16 +71,23 @@ class Market:
         self.simulation.history.append(fair["price"])
         self.history.append({
             "timestamp": fair["updated_at"], "fair": fair["price"],
+            "reference": self.reference()["price"],
             "last": self.engine.trades[-1]["price"] if self.engine.trades else None,
         })
 
     def fair(self) -> dict:
+        return {"price": math.exp(self.log_fair) * (1 + self.simulation.oracle_bps / 10000),
+                "updated_at": max(self.fair_updated_at, self.simulation.oracle_updated_at)}
+
+    def reference(self) -> dict:
+        """Evaluator-only fundamental. Never included in an LLM observation."""
         return {"price": math.exp(self.log_fair), "updated_at": self.fair_updated_at}
 
     def snapshot(self) -> dict:
         return {
             "type": "snapshot", "sequence": self.sequence, "timestamp": now(),
             "book": self.engine.book(), "fair": self.fair(),
+            "reference": self.reference(),
             "recent_trades": list(self.engine.trades),
             "simulation": self.simulation.snapshot(), "history": list(self.history),
             "stats": {"trades": self.engine.trade_count, "volume": self.engine.volume,
@@ -104,11 +119,16 @@ class Market:
                 self.publish()
 
 
-def create_app(config: MarketConfig | None = None, *, demo: bool = False) -> FastAPI:
+def create_app(config: MarketConfig | None = None, *, demo: bool = False,
+               llm_config: LLMConfig | None = None, brain=None, log_path: Path | None = None) -> FastAPI:
     @asynccontextmanager
     async def lifespan(app: FastAPI):
-        app.state.market = Market(config or MarketConfig())
-        app.state.market.simulation.set_running(demo)
+        app.state.market = Market(config or MarketConfig(), llm_config=llm_config, brain=brain, log_path=log_path)
+        if demo:
+            try:
+                app.state.market.simulation.set_running(True)
+            except ValueError as exc:
+                app.state.market.simulation.last_error = str(exc)
         task = asyncio.create_task(app.state.market.run_prices())
         agents_task = asyncio.create_task(app.state.market.simulation.run())
         try:
@@ -120,6 +140,7 @@ def create_app(config: MarketConfig | None = None, *, demo: bool = False) -> Fas
                 await task
             with suppress(asyncio.CancelledError):
                 await agents_task
+            await app.state.market.simulation.aclose()
 
     app = FastAPI(title="Agent Exchange", lifespan=lifespan)
     static = Path(__file__).parent / "static"
@@ -140,9 +161,43 @@ def create_app(config: MarketConfig | None = None, *, demo: bool = False) -> Fas
             raise HTTPException(404, "Unknown simulation action")
         market = app.state.market
         async with market.lock:
-            market.simulation.set_running(action == "start")
+            try:
+                market.simulation.set_running(action == "start")
+            except ValueError as exc:
+                raise HTTPException(409, str(exc)) from exc
             market.publish()
             return market.simulation.snapshot()
+
+    @app.patch("/experiment/oracle")
+    async def oracle_control(request: EnabledRequest):
+        market = app.state.market
+        async with market.lock:
+            market.simulation.set_oracle_enabled(request.enabled)
+            market.publish()
+            return market.simulation.snapshot()
+
+    @app.get("/experiment/export")
+    async def export_experiment():
+        simulation = app.state.market.simulation
+        if simulation.log_path and simulation.log_path.exists():
+            return FileResponse(simulation.log_path, media_type="application/x-ndjson",
+                                filename="experiment.jsonl")
+        return Response("".join(json.dumps(e) + "\n" for e in simulation.events),
+                        media_type="application/x-ndjson",
+                        headers={"Content-Disposition": 'attachment; filename="experiment.jsonl"'})
+
+    @app.patch("/experiment/governor")
+    async def governor_control(request: GovernorRequest):
+        market = app.state.market
+        async with market.lock:
+            market.simulation.governor.set_mode(request.mode)
+            market.publish()
+            return market.simulation.governor.snapshot()
+
+    @app.get("/governor")
+    async def governor():
+        async with app.state.market.lock:
+            return app.state.market.simulation.governor.snapshot()
 
     @app.patch("/agents/{agent_id}")
     async def agent_control(agent_id: str, request: EnabledRequest):
@@ -169,6 +224,7 @@ def create_app(config: MarketConfig | None = None, *, demo: bool = False) -> Fas
         market = app.state.market
         async with market.lock:
             result = market.engine.place(request)
+            market.simulation.log("external_order", agent_id=request.agent_id, result=result)
             market.publish()
             return {**result, "sequence": market.sequence}
 
@@ -187,6 +243,7 @@ def create_app(config: MarketConfig | None = None, *, demo: bool = False) -> Fas
                 raise HTTPException(404, str(exc.args[0])) from exc
             except ValueError as exc:
                 raise HTTPException(409, str(exc)) from exc
+            market.simulation.log("external_cancel", agent_id=agent_id, order=order)
             market.publish()
             return {"order": order, "sequence": market.sequence}
 

@@ -5,3 +5,6 @@ __pycache__/
 .env.*
 !.env.example
 *.egg-info/
+exchange/runs/
+# Sites owns this separate source checkout.
+/explainer-site/
