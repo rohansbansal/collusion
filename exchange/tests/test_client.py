@@ -10,6 +10,9 @@ import uvicorn
 
 from exchange import ExchangeClient
 from exchange.api import MarketConfig, create_app
+from exchange_client import ExchangeClient as AgentClient, OrderNotOpen
+
+import pytest
 
 
 def test_agent_client_end_to_end():
@@ -45,6 +48,25 @@ def test_agent_client_end_to_end():
                         await seller.cancel_order(sale["order"]["order_id"])
                         assert (await buyer.snapshot())["book"]["asks"] == []
                         assert (await buyer.orders())[0]["status"] == "filled"
+
+                async with AgentClient("typed-seller", url) as seller, AgentClient("typed-buyer", url) as buyer:
+                    async with aclosing(buyer.stream()) as feed:
+                        assert (await anext(feed)).book.best_ask is None
+                        sale = await seller.sell(100, 5)
+                        fill = await buyer.buy(101, 2)
+                        assert fill.order.filled_quantity == 2
+                        assert fill.trades[0].maker_order_id == sale.order.order_id
+                        assert (await seller.orders())[0].remaining == 3
+                        assert (await buyer.fair()).price > 0
+                        async with asyncio.timeout(5):
+                            async for snapshot in feed:
+                                if snapshot.sequence >= fill.sequence:
+                                    assert snapshot.book.best_ask.quantity == 3
+                                    break
+                        await seller.cancel_order(sale.order.order_id)
+                        assert (await buyer.snapshot()).book.best_ask is None
+                        with pytest.raises(OrderNotOpen):
+                            await buyer.cancel_order(fill.order.order_id)
 
             asyncio.run(run())
         finally:

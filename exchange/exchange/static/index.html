@@ -1,0 +1,52 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#f7f8fa">
+  <title>Exchange — Agent trading floor</title>
+  <link rel="stylesheet" href="/static/style.css">
+  <script src="/static/app.js" defer></script>
+</head>
+<body>
+  <aside class="sidebar">
+    <a class="brand" href="/" aria-label="Exchange home"><span class="brand-mark">e<span>↗</span></span><span>exchange<span class="brand-period">.</span></span></a>
+    <div class="nav-label">WORKSPACE</div>
+    <nav aria-label="Main navigation">
+      <a class="nav-item selected" href="#overview"><span>◫</span> Overview <span class="nav-dot"></span></a>
+      <a class="nav-item" href="#agents-section"><span>⌘</span> Trading agents <span class="nav-count">5</span></a>
+      <a class="nav-item" href="#trades-section"><span>⇄</span> Executions</a>
+    </nav>
+    <div class="sidebar-bottom"><div class="sandbox-icon">◇</div><strong>Your own little market.</strong><p>Five strategies. One order book.<br>A market that never sits still.</p><div class="sandbox-tag"><span></span> LOCAL SANDBOX</div><a href="/docs" target="_blank" rel="noopener">Explore the API <span>↗</span></a></div>
+  </aside>
+
+  <main id="overview">
+    <header class="topbar"><div class="breadcrumb">Workspace <span>/</span> <strong>Trading floor</strong></div><div class="connection"><span id="connection-dot" class="status-dot"></span><span id="connection-status" role="status">Connecting</span><span class="top-divider"></span><span class="avatar">Y</span></div></header>
+    <div class="content">
+      <div class="page-heading"><div><div class="eyebrow">THE TRADING FLOOR</div><h1>A market of minds<span>.</span></h1><p>Watch autonomous strategies find their edge, one trade at a time.</p></div><button id="simulation-control" class="button primary" disabled><span id="control-icon">Ⅱ</span><span id="control-label">Pause simulation</span></button></div>
+      <div id="error" class="error" role="alert" hidden></div>
+      <div class="market-strip"><div class="market-name"><span class="market-icon">✳</span><div><strong>SYN / USD</strong><span>Synthetic spot market</span></div><span class="pill">SIMULATED</span></div><div class="session-status"><span class="status-dot" id="simulation-dot"></span><span id="simulation-status">Loading market</span><span class="muted" id="round-count"></span></div></div>
+
+      <section class="metrics" aria-label="Market statistics">
+        <article class="metric"><span>External fair price <span class="info" title="Independent random walk; not executable liquidity">i</span></span><div><strong id="fair-price">—</strong><span class="metric-change" id="fair-change">—</span></div><small>Independent price signal</small></article>
+        <article class="metric"><span>Last traded price</span><div><strong id="last-price">—</strong></div><small id="last-note">Waiting for the first match</small></article>
+        <article class="metric"><span>Bid–ask spread</span><div><strong id="spread">—</strong><span class="unit" id="spread-bps"></span></div><small id="open-orders">0 resting orders</small></article>
+        <article class="metric"><span>Session volume</span><div><strong id="volume">0</strong><span class="unit">units</span></div><small id="trade-count">0 executed trades</small></article>
+      </section>
+
+      <div class="market-grid">
+        <section class="panel chart-panel"><div class="panel-header"><div><h2>Price discovery</h2><p>Where the market meets its reference.</p></div><span class="timeframe">1 MIN</span></div><div class="chart-legend"><span><i class="fair-line"></i> External fair</span><span><i class="trade-line"></i> Last trade</span><span id="chart-live" class="chart-live"><i></i> LIVE</span></div><div class="chart-wrap"><canvas id="price-chart" role="img" aria-label="Live price chart showing external fair and last trade over the past minute"></canvas><div class="chart-empty" id="chart-empty">Waiting for price history…</div></div><div class="chart-footer"><span><span class="tiny-dot"></span> External fair follows an independent random walk</span><span>Prices in USD · 1 tick = $0.01</span></div></section>
+        <section class="panel book-panel"><div class="panel-header"><div><h2>Order book</h2><p>Live aggregated liquidity</p></div><span class="book-symbol">SYN / USD</span></div><div class="book-columns"><span>Price (USD)</span><span>Size</span><span>Total</span></div><div class="book-side asks" id="asks"><div class="empty-book">No sell orders</div></div><div class="book-mid"><strong id="book-mid-price">—</strong><span id="book-mid-label">External fair</span><span class="book-spread" id="book-spread">— spread</span></div><div class="book-side bids" id="bids"><div class="empty-book">No buy orders</div></div><div class="book-balance"><div><span id="bid-share">Buy 50%</span><span id="ask-share">Sell 50%</span></div><div class="balance-track"><i id="balance-fill"></i></div></div></section>
+      </div>
+
+      <section id="agents-section" class="agents-section"><div class="section-heading"><div><h2>The participants <span class="count-badge">05</span></h2><p>Different convictions. The same playing field.</p></div><span class="agents-active"><span class="status-dot"></span><span id="active-count">5 agents online</span></span></div><div id="agent-cards" class="agent-cards" aria-label="Trading agents"></div></section>
+
+      <div class="bottom-grid">
+        <section id="trades-section" class="panel trades-panel"><div class="panel-header"><div><h2>Recent executions</h2><p>Every match has two sides.</p></div><span class="live-badge"><span class="status-dot"></span> REAL TIME</span></div><div class="table-scroll"><table><thead><tr><th>Time</th><th>Buyer <span>→</span> Seller</th><th class="number">Price</th><th class="number">Size</th></tr></thead><tbody id="trades-body"><tr><td colspan="4" class="table-empty">Agents are warming up. Trades will appear here.</td></tr></tbody></table></div></section>
+        <section class="panel detail-panel"><div class="panel-header"><div><h2>Strategy spotlight</h2><p>Get to know a participant.</p></div><span>↗</span></div><div id="agent-detail" class="agent-detail"></div><div class="risk-note"><span>◇</span><p>Positions are limited to ±50 units per demo agent. P&L is marked to external fair.</p></div></section>
+      </div>
+      <footer><span><strong>exchange.</strong> A playground for autonomous markets.</span><span>In-memory simulation <span>·</span> No real funds <span>·</span> <a href="/docs">API docs ↗</a></span></footer>
+    </div>
+  </main>
+</body>
+</html>

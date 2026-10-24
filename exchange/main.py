@@ -2,7 +2,7 @@
 
 from exchange.api import create_app
 
-app = create_app()
+app = create_app(demo=True)
 
 
 def main():

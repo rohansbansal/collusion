@@ -6,6 +6,7 @@ readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
     "anyio>=4.0",
+    "exchange-client",
     "fastapi>=0.162.0",
     "httpx>=0.28.1",
     "uvicorn[standard]>=0.54.0",
@@ -20,3 +21,6 @@ dev = [
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["."]
+
+[tool.uv.sources]
+exchange-client = { path = "../client", editable = true }

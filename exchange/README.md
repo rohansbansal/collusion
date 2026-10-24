@@ -2,7 +2,8 @@
 
 A single-market, in-memory simulated exchange. Agents submit limit orders through
 HTTP and receive the aggregated order book and an independent external fair price
-over WebSocket. No orders or liquidity are inserted automatically.
+over WebSocket. The default server also runs five demo trading agents and serves
+a live dashboard at `/`.
 
 ## Run
 
@@ -12,10 +13,58 @@ uv run python main.py
 ```
 
 The server listens on `http://127.0.0.1:8000`; interactive API docs are at `/docs`.
+Open `http://127.0.0.1:8000/` for the live trading floor. The agents start trading
+automatically. No frontend build or Node installation is required.
 In a second terminal, run `uv run python example_agent.py` for a working agent.
 Run tests with `uv run pytest`.
 
+## Dashboard and demo agents
+
+The dashboard streams the actual exchange state: external fair and execution
+prices, aggregated book depth, spread, volume, recent matches, and five agent
+cards with positions, fills, and P&L. Select a card's name to inspect its current
+strategy signal. Pause/resume the whole simulation or use each card's switch to
+pause one agent. The page reconnects automatically after a server interruption.
+
+| Agent | Strategy |
+| --- | --- |
+| Atlas | Market maker: quotes both sides, with an inventory-based price skew |
+| Pulse | Momentum: follows the fair price's recent direction |
+| Echo | Mean reversion: trades toward a rolling fair-price average |
+| Prism | Fair value: takes liquidity at favorable prices and rests quotes around fair |
+| Drift | Noise trader: random buy/sell direction, size, and liquidity demand |
+
+These are rule-based agents, with no model API keys required. Every 800 ms they
+make decisions against the shared book and submit real limit orders to the same
+matching engine as external agents. They cancel stale quotes before replacing
+them. Each demo agent has a ±50-unit inventory limit, including potential fills
+from resting orders. Reserve the IDs `atlas`, `pulse`, `echo`, `prism`, and `drift`
+for the built-in agents when connecting external clients.
+
+P&L is `cash + position * current_external_fair`, in tick units in the API. The
+dashboard displays ticks as cents. It includes unrealized P&L and has no fees.
+Pausing cancels demo agents' resting orders, preserves positions and cash, and
+leaves the external fair-price process running. External agents can continue
+trading during a pause.
+
+For an empty exchange without automatic demo trading, use `create_app()` directly
+(its `demo` argument defaults to `False`). To enable demo trading in a custom
+server use `create_app(MarketConfig(seed=42), demo=True)`. The independent fair
+path is unaffected by agent decisions.
+
+Additional controls: `GET /agents`, `POST /simulation/start`,
+`POST /simulation/pause`, and `PATCH /agents/{id}` with `{"enabled": false}`.
+Raw snapshots now also include `simulation`, `stats`, and a bounded `history`
+window. Session totals and agent ledgers retain all fills, independently of the
+latest-100-trades display window. All controls are intended for this local,
+unauthenticated sandbox.
+
 ## Agent client
+
+For the independently installable typed agent library, see
+[`../client/README.md`](../client/README.md). New agents should use
+`from exchange_client import ExchangeClient`. The original `exchange` import
+below remains available for dictionary-based callers.
 
 Run from this directory:
 

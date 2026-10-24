@@ -3,14 +3,25 @@
 import asyncio
 import math
 import random
+from collections import deque
 from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from pathlib import Path
 
 import anyio
 from fastapi import FastAPI, HTTPException, Query, WebSocket, WebSocketDisconnect
+from fastapi.responses import FileResponse
+from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel, ConfigDict, StrictBool
 
 from .engine import MatchingEngine, OrderRequest
+from .simulation import Simulation
+
+
+class EnabledRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    enabled: StrictBool
 
 
 def now() -> str:
@@ -43,6 +54,17 @@ class Market:
         self.log_fair = math.log(config.initial_fair)
         self.fair_updated_at = now()
         self.sequence = 0
+        self.simulation = Simulation(self, config.seed)
+        self.history: deque[dict] = deque(maxlen=240)
+        self.sample_history()
+
+    def sample_history(self):
+        fair = self.fair()
+        self.simulation.history.append(fair["price"])
+        self.history.append({
+            "timestamp": fair["updated_at"], "fair": fair["price"],
+            "last": self.engine.trades[-1]["price"] if self.engine.trades else None,
+        })
 
     def fair(self) -> dict:
         return {"price": math.exp(self.log_fair), "updated_at": self.fair_updated_at}
@@ -52,6 +74,10 @@ class Market:
             "type": "snapshot", "sequence": self.sequence, "timestamp": now(),
             "book": self.engine.book(), "fair": self.fair(),
             "recent_trades": list(self.engine.trades),
+            "simulation": self.simulation.snapshot(), "history": list(self.history),
+            "stats": {"trades": self.engine.trade_count, "volume": self.engine.volume,
+                      "open_orders": len(self.engine.active),
+                      "last_price": self.engine.trades[-1]["price"] if self.engine.trades else None},
         }
 
     def publish(self):
@@ -74,22 +100,60 @@ class Market:
             await asyncio.sleep(self.config.interval_seconds)
             async with self.lock:
                 self.step_fair()
+                self.sample_history()
                 self.publish()
 
 
-def create_app(config: MarketConfig | None = None) -> FastAPI:
+def create_app(config: MarketConfig | None = None, *, demo: bool = False) -> FastAPI:
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         app.state.market = Market(config or MarketConfig())
+        app.state.market.simulation.set_running(demo)
         task = asyncio.create_task(app.state.market.run_prices())
+        agents_task = asyncio.create_task(app.state.market.simulation.run())
         try:
             yield
         finally:
             task.cancel()
+            agents_task.cancel()
             with suppress(asyncio.CancelledError):
                 await task
+            with suppress(asyncio.CancelledError):
+                await agents_task
 
     app = FastAPI(title="Agent Exchange", lifespan=lifespan)
+    static = Path(__file__).parent / "static"
+    app.mount("/static", StaticFiles(directory=static), name="static")
+
+    @app.get("/", include_in_schema=False)
+    async def dashboard():
+        return FileResponse(static / "index.html")
+
+    @app.get("/agents")
+    async def agents():
+        async with app.state.market.lock:
+            return app.state.market.simulation.snapshot()
+
+    @app.post("/simulation/{action}")
+    async def simulation_control(action: str):
+        if action not in ("start", "pause"):
+            raise HTTPException(404, "Unknown simulation action")
+        market = app.state.market
+        async with market.lock:
+            market.simulation.set_running(action == "start")
+            market.publish()
+            return market.simulation.snapshot()
+
+    @app.patch("/agents/{agent_id}")
+    async def agent_control(agent_id: str, request: EnabledRequest):
+        market = app.state.market
+        async with market.lock:
+            try:
+                market.simulation.set_enabled(agent_id, request.enabled)
+            except KeyError as exc:
+                raise HTTPException(404, "Unknown simulation agent") from exc
+            market.publish()
+            return market.simulation.snapshot()
 
     @app.get("/book")
     async def book():
