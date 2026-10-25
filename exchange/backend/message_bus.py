@@ -20,6 +20,11 @@ class PrivateMessageBoard(BaseModel):
 
 class SellerObservation(BaseModel):
     round: int
+    seller_name: str = ""
+    conversation_stage: str = "negotiate"
+    conversation_turn: int = 0
+    active_sellers: list[str] = Field(default_factory=list)
+    closed_sellers: list[str] = Field(default_factory=list)
     own_price: Decimal
     own_inventory: int
     own_budget: Decimal

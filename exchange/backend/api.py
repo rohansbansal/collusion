@@ -13,7 +13,8 @@ from pydantic import BaseModel, Field
 from dotenv import load_dotenv
 from starlette.responses import StreamingResponse
 
-from .agents import BuyerAgent
+from .agents import BuyerAgent, BuyerDecision
+from .continuous import LiveMarket, LiveSettings
 from .experiment import Experiment, RoundResult, SellerTurn
 from .market import Quote, Sale
 from .message_bus import MarketMessage, PrivateMessageBoard
@@ -22,15 +23,31 @@ load_dotenv(Path(__file__).resolve().parents[2] / ".env")
 load_dotenv(Path(__file__).resolve().parents[1] / ".env")
 
 
+live_markets: dict[str, LiveMarket] = {}
+
+
 class ExperimentRequest(BaseModel):
     rounds: int = Field(default=1, gt=0, le=100)
-    buyers: int = Field(default=3, ge=1, le=100)
-    buyer_budget: str = "10.00"
-    model: str = Field(default_factory=lambda: os.getenv("OPENAI_MODEL", "gpt-4o-mini"))
+    buyers: int = Field(default=100, ge=1, le=100)
+    buyer_budget: Decimal = Field(default=Decimal("10.00"), ge=0)
+    buyer_max_price: Decimal = Field(default=Decimal("1.50"), gt=0)
+    model: str = Field(default_factory=lambda: os.getenv("OPENAI_MODEL", "gpt-6.1-sol"))
+
+
+def make_buyers(request: ExperimentRequest) -> list[BuyerAgent]:
+    # Fixed, reproducible valuation spread: 60–140% of the typical maximum price.
+    return [BuyerAgent(
+        name=f"buyer-{n + 1}", budget=request.buyer_budget,
+        willingness_to_pay=(request.buyer_max_price * (
+            Decimal("1") if request.buyers == 1 else
+            Decimal("0.6") + Decimal("0.8") * n / (request.buyers - 1)
+        )).quantize(Decimal("0.01")),
+    ) for n in range(request.buyers)]
 
 
 class ExperimentResponse(BaseModel):
     rounds: int
+    buyer_decisions: list[BuyerDecision]
     quotes: list[Quote]
     purchases: list[Sale]
     seller_revenue: dict[str, Decimal]
@@ -70,8 +87,7 @@ def create_app() -> FastAPI:
             raise HTTPException(status_code=503, detail="OPENAI_API_KEY is required for LangChain agents")
         try:
             experiment = Experiment(
-                buyers=[BuyerAgent(name=f"buyer-{n}", budget=Decimal(request.buyer_budget))
-                        for n in range(request.buyers)],
+                buyers=make_buyers(request),
                 rounds=request.rounds,
                 model=request.model,
             )
@@ -79,6 +95,7 @@ def create_app() -> FastAPI:
         except Exception as error:
             raise HTTPException(status_code=502, detail=str(error)) from error
         return ExperimentResponse(
+            buyer_decisions=experiment.buyer_decisions,
             rounds=experiment.round,
             quotes=experiment.market.quotes(),
             purchases=purchases,
@@ -103,17 +120,18 @@ def create_app() -> FastAPI:
         def run() -> None:
             try:
                 experiment = Experiment(
-                    buyers=[BuyerAgent(name=f"buyer-{n}", budget=Decimal(request.buyer_budget))
-                            for n in range(request.buyers)],
+                    buyers=make_buyers(request),
                     rounds=request.rounds,
                     model=request.model,
                 )
                 events.put(("status", {"message": "The sellers are getting ready."}))
                 purchases = experiment.run(
                     on_turn=lambda turn: events.put(("turn", turn.model_dump(mode="json"))),
+                    on_buyer=lambda decision: events.put(("buyer", decision.model_dump(mode="json"))),
                     on_round=lambda round_result: events.put(("round", round_result.model_dump(mode="json"))),
                 )
                 result = ExperimentResponse(
+                    buyer_decisions=experiment.buyer_decisions,
                     rounds=experiment.round,
                     quotes=experiment.market.quotes(),
                     purchases=purchases,
@@ -141,6 +159,30 @@ def create_app() -> FastAPI:
                     break
 
         return StreamingResponse(generate(), media_type="text/event-stream")
+
+    @app.post("/market/stream")
+    async def stream_market(settings: LiveSettings):
+        if not os.getenv("OPENAI_API_KEY"):
+            raise HTTPException(status_code=503, detail="OPENAI_API_KEY is required")
+        engine = LiveMarket(settings)
+        live_markets[engine.run_id] = engine
+        async def events():
+            stream = engine.stream()
+            try:
+                async for event in stream:
+                    yield event
+            finally:
+                await stream.aclose()
+                live_markets.pop(engine.run_id, None)
+        return StreamingResponse(events(), media_type="text/event-stream",
+                                 headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+
+    @app.post("/market/{run_id}/probe")
+    async def undercut_probe(run_id: str):
+        engine = live_markets.get(run_id)
+        if engine is None:
+            raise HTTPException(status_code=404, detail="Market is no longer running")
+        return {"applied": await engine.probe()}
 
     return app
 

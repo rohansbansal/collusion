@@ -11,13 +11,13 @@ load_dotenv(Path(__file__).resolve().parents[1] / ".env")
 
 def main() -> None:
     api_key = os.getenv("OPENAI_API_KEY")
-    model = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
+    model = os.getenv("OPENAI_MODEL", "gpt-6.1-sol")
     if not api_key:
         raise SystemExit("OPENAI_API_KEY was not found in the environment or .env")
 
     from langchain_openai import ChatOpenAI
 
-    response = ChatOpenAI(model=model, temperature=0).invoke(
+    response = ChatOpenAI(model=model, use_responses_api=True).invoke(
         "Reply with exactly: banana market connection works"
     )
     print(f"Model: {model}")

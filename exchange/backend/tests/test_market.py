@@ -3,6 +3,7 @@ from decimal import Decimal
 import pytest
 
 from backend import BuyerAgent, Experiment, Market, MarketMessage, MessageBus, SellerAgent
+from backend.agents import SellerDecision
 
 
 def test_market_starts_with_three_banana_quotes():
@@ -15,14 +16,14 @@ def test_market_starts_with_three_banana_quotes():
     ]
 
 
-def test_multiple_agents_make_independent_purchase_choices():
+def test_multiple_buyers_choose_the_cheapest_offer():
     market = Market()
     agents = [BuyerAgent(name=name, budget=Decimal("2.00")) for name in ("one", "two")]
 
     purchases = [agent.buy(market) for agent in agents]
 
-    assert len({purchase.seller for purchase in purchases}) > 1
-    assert sum(seller.quantity for seller in market.sellers) == 28
+    assert {purchase.seller for purchase in purchases} == {"seller-1"}
+    assert sum(seller.quantity for seller in market.sellers) == 2998
     assert all(agent.budget == Decimal("1.00") for agent in agents)
 
 
@@ -40,10 +41,10 @@ def test_agent_cannot_buy_without_enough_budget():
     market = Market()
     agent = BuyerAgent(name="careful", budget=Decimal("0.50"))
 
-    with pytest.raises(ValueError, match="cannot afford"):
+    with pytest.raises(ValueError, match="affordable"):
         agent.buy(market)
 
-    assert market.sellers[0].quantity == 10
+    assert market.sellers[0].quantity == 1000
     assert not market.purchases
 
 
@@ -68,7 +69,7 @@ def test_seller_inventory_decreases_over_time():
 def test_seller_prompt_has_profit_objective_without_buyer_private_information():
     prompt = SellerAgent(name="seller", price=Decimal("1.00")).prompt
 
-    assert "maximize your own profit" in prompt
+    assert "maximize your own cumulative profit" in prompt
     assert "buyers' private information" in prompt
 
 
@@ -85,7 +86,13 @@ def test_message_bus_supports_public_and_private_messages():
     assert len(bus.messages) == 2
 
 
-def test_experiment_runs_buyers_and_seller_communication():
+def test_experiment_runs_buyers_and_seller_communication(monkeypatch):
+    def decide(self, observation, model):
+        if observation.conversation_stage != "negotiate":
+            return [SellerDecision(action="public_message", content="proposal")]
+        return [SellerDecision(action="quote_submitted", price=Decimal("1"))]
+
+    monkeypatch.setattr(SellerAgent, "decide_with_langchain", decide)
     experiment = Experiment(
         buyers=[BuyerAgent(name="buyer", budget=Decimal("10.00"))],
         rounds=2,
@@ -93,6 +100,6 @@ def test_experiment_runs_buyers_and_seller_communication():
 
     purchases = experiment.run()
 
-    assert len(purchases) == 1
+    assert len(purchases) == 2
     assert experiment.round == 2
-    assert len(experiment.bus.messages) == 6
+    assert len(experiment.bus.messages) == 12

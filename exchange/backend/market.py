@@ -60,15 +60,19 @@ class Market(BaseModel):
         quantity: int = 1,
         max_price: Decimal | None = None,
         randomize: bool = False,
+        max_unit_price: Decimal | None = None,
     ) -> Sale:
         available = [
             seller for seller in self.sellers
             if seller.quote().quantity > 0
             and (max_price is None or seller.price <= max_price)
+            and (max_unit_price is None or seller.price <= max_unit_price)
         ]
         if not available:
             raise ValueError("no affordable seller has enough bananas")
         if randomize:
+            cheapest = min(seller.price for seller in available)
+            available = [seller for seller in available if seller.price == cheapest]
             selection_key = f"{buyer}:{len(self.purchases)}".encode()
             seller = available[int.from_bytes(sha256(selection_key).digest()[:4], "big") % len(available)]
         else:
